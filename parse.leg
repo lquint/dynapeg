@@ -1,0 +1,625 @@
+%{
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <sys/stat.h>
+#include <math.h>
+
+#include "inputBuffer.c"
+
+#include "peg-nodes.h"
+#include "peg-engine.c"
+#include "class.c"
+;
+
+void fatal(char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "\nError: ");
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+    exit(1);
+}
+
+struct SymbolTable {
+    Symbol **elements;
+    int length;
+};
+
+
+#define SymbolTable_initialiser {0,0}
+SymbolTable symbolTable= SymbolTable_initialiser;
+
+Symbol *createSymbol(char *name) {
+    Symbol *symbol= calloc(1, sizeof(Symbol));
+    symbol->name= strdup(name);
+    symbol->number=0;
+    return symbol;
+}
+
+
+
+
+#define new(type)			mkNode(sizeof(struct type),type)
+
+Node *mkNode(size_t size,enum op type)
+{
+    Node *node= calloc(1, size);
+    node->type= type;
+    return node;
+}
+
+Node *mkString(char *s)
+{
+    Node *node= new(String);
+    node->String.string= strdup(s);
+    node->String.len=strlen(s);
+    return node;
+}
+
+Node *mkId(Symbol *s){
+
+    Node *node= new(Id);
+    node->Id.symbol=s;
+    return node;
+}
+
+
+
+Node *mkQuery(Node *n)
+{
+    Node *node= new(Query);
+    node->Query.children[0]= n;
+    return node;
+}
+
+Node *mkOr(Node *node1, Node *node2)
+{
+    Node *node= new(Or);
+    node->Or.children[0]= node1;
+    node->Or.children[1]= node2;
+    return node;
+}
+
+Node *mkAnd(Node *node1, Node *node2)
+{
+    Node *node= new(And);
+    node->And.children[0]= node1;
+    node->And.children[1]= node2;
+    return node;
+}
+
+Node *mkStar(Node *n)
+{
+    Node *node= new(Star);
+    node->Star.children[0]= n;
+    return node;
+}
+
+Node *mkClass(char* str)
+{
+    Node *node= new(Class);
+    node->Class.array= str;
+    return node;
+}
+
+Node *mkPlus(Node *n)
+{
+    Node *node= new(Plus);
+    node->Plus.children[0]= n;
+    return node;
+}
+
+Node *mkDot()
+{
+    Node *node= new(Dot);
+    return node;
+}
+
+Node *mkExc(Node *n)
+{
+    Node *node= new(Exc);
+    node->Exc.children[0]= n;
+    return node;
+}
+
+Node *mkEt(Node *n)
+{
+    Node *node= new(Et);
+    node->Et.children[0]= n;
+    return node;
+}
+
+
+
+void print(Node *node)
+{
+    switch (node->type) {
+      case String:
+	  printf("\"%s\"", node->String.string);
+	  return;
+      case Query:
+	  print(node->Query.children[0]);
+	  printf("?");
+	  return;
+      case Star:
+	  print(node->Query.children[0]);
+	  printf("*");
+	  return;
+      case Plus:
+	  print(node->Query.children[0]);
+	  return;
+      case Or:
+	  print(node->Or.children[0]);
+	  printf("Or");
+	  print(node->Or.children[1]);
+	  return;
+      case And:
+	  print(node->And.children[0]);
+	  printf("And");
+	  print(node->And.children[1]);
+	  return;
+      case Class:
+	  printf("Class");
+	  for(int i=0;i<32;i++){
+        printf("\\%03o",(unsigned char)node->Class.array[i]);
+      }
+	  return;
+      case Dot:
+	  printf("Dot");
+	  return;
+      case Exc:
+	  printf("!");
+	  print(node->Exc.children[0]);
+	  return;
+      case Et:
+	  printf("&");
+	  print(node->Et.children[0]);
+	  return;
+      case Id:
+	  printf("%s\n",get(node,Id,symbol)->name);
+	  return;
+    }
+    abort();
+}
+
+void println(Node *node)
+{
+    print(node);
+    printf("\n");
+}
+InputBuffer *inputBuffer=0;
+
+#define YY_INPUT(buff,result,maxSize) \
+{if (atEnd(inputBuffer)){ \
+    result=0; \
+} \
+else { \
+    *buff=currentChar(inputBuffer); \
+    advance(inputBuffer,1); \
+    result=1; \
+}}
+
+
+
+
+
+Symbol *intern(char *string){
+    int left=0,right=symbolTable.length-1;
+    char *name = strdup(string),*p =name;
+    while(*p){
+        if(*p=='-'){
+            *p='_';
+        }
+        p++;
+    }
+    while (left<=right) {
+        int middle=(left+right)/2;
+        int comp=strcmp(name,symbolTable.elements[middle]->name);
+
+        if(comp<0){
+            right=middle-1;
+        }
+        else if(comp>0){
+            left=middle+1;
+        }
+        else{
+            free(name);
+            return symbolTable.elements[middle];
+        }
+    }
+
+    symbolTable.elements= realloc(symbolTable.elements,sizeof(symbolTable.elements[0]) * (symbolTable.length+1));
+    memmove(symbolTable.elements+left+1,symbolTable.elements+left,(symbolTable.length-left)*sizeof(symbolTable.elements[0]));
+    symbolTable.length++;
+    Symbol *s= symbolTable.elements[left]=createSymbol(name);
+    free(name);
+    return s;
+}
+
+
+
+void setRule(char *name, Node *rule)
+{
+    printf("Setting rule %s to ", name);
+    println(rule);
+    intern(name)->rule=rule;
+}
+
+#define YYSTYPE Node *
+
+%}
+
+start		= - declaration+
+
+declaration	= i:id '=' - e:expression 	{ setRule(get(i, Id, symbol)->name, e) }
+
+expression	= or
+
+or		= a:and "|" - o:or		{ $$ = mkOr(a, o) }
+		| a:and				{ $$ = a }
+
+and		= p:prefix a:and		{ $$ = mkAnd(p, a) }
+		| p:prefix			{ $$ = p }
+
+prefix		= "!" - p : postfix      	{ $$ = mkExc(p) }
+        | "&" - p : postfix         { $$ = mkEt(p) }
+		| p: postfix            	{ $$ = p}
+
+postfix		= s:atom ( "?" -		{ s = mkQuery(s) }
+			 | "*" -		{ s = mkStar(s) }
+			 | "+" -		{ s = mkPlus(s) }
+			 )?			{ $$ = s }
+
+atom		= string | class | dot | rule | '(' - expression ')' -
+
+rule		= i:id !'='        		{ $$ = mkId(intern(yytext)) }
+
+id		= < [a-zA-z_\-][a-zA-z_0-9]* > - 	{ $$ = mkId(intern(yytext)) }
+
+string		= '"' < [^\"]* > '"' -     	{ $$ = mkString(unescapedString(yytext)) }
+            | "'" < [^\']* > "'" -     	{ $$ = mkString(unescapedString(yytext)) }
+
+class		= '['-<(!']'.)*> ']' - 	{ $$=mkClass(classify(yytext)) }
+
+dot		= '.' -               		{ $$=mkDot() }
+
+-		= space*
+
+space		= [ \t] | '\n' '\r'* | '\r' '\n'*
+
+%%
+
+
+
+struct NodeCount{
+    int String;
+    int Query;
+    int Star;
+    int Plus;
+    int Or;
+    int And;
+    int Class;
+    int Dot;
+    int Exc;
+    int Et;
+    int Id; 
+};
+
+NodeCount nodeCount={
+    .String=0,
+    .Query=0,
+    .Star=0,
+    .Plus=0,
+    .Or=0,
+    .And=0,
+    .Class=0,
+    .Dot=0,
+    .Exc=0,
+    .Et=0,
+    .Id=0 
+};
+
+
+
+int nodeNumber=0;
+
+int printCode(FILE *file,Node *node)
+{
+    int thisNumber=++nodeNumber;
+    switch (node->type) {
+
+      case String:{
+     
+      fprintf(file,"Node node%i = { .String = { String, ",thisNumber);
+      fprintf(file,"\"");
+      for(int i=0;i<node->String.len;i++){
+          int c = (unsigned char) node->String.string[i];
+          switch(c) {
+              case '"':
+              case '\\':
+                fprintf(file,"\\%c",c);
+                continue;
+              default :
+                if(c >=' '  && c <= '~') fprintf(file,"%c",c);
+                else fprintf(file,"\\%03o",c);
+          }
+      }
+	  fprintf(file,"\"");
+      fprintf(file," , %i }}; \n",node->String.len);
+	  return thisNumber;
+      }
+      case Query: {
+          int i = printCode(file,node->Query.children[0]);
+          fprintf(file,"Node node%i",thisNumber);
+          fprintf(file,"= { .Query = { Query, {&node%i} }};\n",i);
+	      return thisNumber;
+      }
+      case Star: {
+          int i = printCode(file,node->Star.children[0]);
+        fprintf(file,"Node node%i",thisNumber);
+      fprintf(file,"= { .Star = { Star, {&node%i} }};\n",i);
+	  return thisNumber;
+      }
+      case Plus:{
+	  int i = printCode(file,node->Plus.children[0]);
+      fprintf(file,"Node node%i = { .Plus = { Plus, {&node%i} }};\n",thisNumber,i);
+	  return thisNumber;
+    }
+      case Or:{
+	  int i = printCode(file,node->Or.children[0]);
+      int j = printCode(file,node->Or.children[1]);
+      fprintf(file,"Node node%i= { .Or = { Or, {&node%i",thisNumber,i);
+      fprintf(file," , &node%i} }};\n",j);
+	  return thisNumber;
+      }
+      case And:{
+	  int i = printCode(file,node->And.children[0]);
+      int j = printCode(file,node->And.children[1]);
+      fprintf(file,"Node node%i= { .And = { And, {&node%i",thisNumber,i);
+      fprintf(file," , &node%i} }};\n",j);
+	  return thisNumber;
+      }
+      case Class:{
+      fprintf(file,"Node node%i= { .Class = { Class, \"",thisNumber);
+      for(int i=0;i<32;i++){
+        fprintf(file,"\\%03o",(unsigned char)node->Class.array[i]);
+      }
+      fprintf(file,"\"  }};\n");
+
+	  return thisNumber;
+      }
+      case Dot:{
+      fprintf(file,"Node node%i= { .Dot = { Dot}};\n",thisNumber);
+	  return thisNumber;
+      }
+      case Exc:{
+      int i = printCode(file,node->Exc.children[0]);
+      fprintf(file,"Node node%i = { .Exc = { Exc, {&node%i} }};\n",thisNumber,i);
+	  return thisNumber;
+      }
+      case Et: {
+	  int i = printCode(file,node->Et.children[0]);
+      fprintf(file,"Node node%i = { .Et = { Et, {&node%i} }};\n",thisNumber,i);
+	  return thisNumber;
+      }
+      case Id: {
+      fprintf(file,"Node node%i = { .Id = { Id, &symbol_%s", thisNumber, get(node,Id, symbol)->name);
+	  fprintf(file," }};\n");
+	  return thisNumber;
+      }
+    }
+    abort();
+    return 0;
+}
+
+
+
+void printSymbolTable(FILE *file) {
+    for (int k= 0; k<symbolTable.length; k++) {
+        int i=printCode(file,symbolTable.elements[k]->rule);
+        fprintf(file,"Node *%s= &node%i;\n",symbolTable.elements[k]->name,i);
+        symbolTable.elements[k]->number=i;
+    }
+}
+void declareSymbols(FILE *file) {
+    for (int k= 0; k<symbolTable.length; k++) {
+       fprintf(file,"Symbol symbol_%s ;\n",symbolTable.elements[k]->name);
+    }
+}
+void defineSymbols(FILE *file) {
+    for (int k= 0; k<symbolTable.length; k++) {
+        Symbol *s=symbolTable.elements[k];
+         fprintf(file,"Symbol symbol_%s = { \"%s\", &node%i, %i};\n",s->name,s->name,s->number,s->number);
+    }
+}
+
+int main(int argc, char **argv)
+{   
+
+    char *opt_f=0;
+    char *opt_c=0;
+    char *opt__=0;
+    for(int i=1;i<argc;i++){
+        char *arg=argv[i];
+        if(!strcmp(arg,"-f") && i<argc-1){
+            i++;
+            opt_f=argv[i];
+            continue;
+        }
+        if(!strcmp(arg,"-c") && i<argc-1){
+            i++;
+            opt_c=argv[i];
+            continue;
+        }
+        opt__=arg;
+    }
+    if (opt_f && opt__) fatal("file and command line expressions cannot both be supplied");
+    if (!opt_f && !opt__) fatal("no expression specified");
+    if (opt__) 	  inputBuffer = mkInputBuffer(argv[1]);
+    if (opt_f){
+        FILE *fp= fopen(argv[2], "r");
+        if (!fp) {
+        perror(argv[2]);
+        exit(1);
+        }
+        struct stat sb;
+        if (fstat(fileno(fp), &sb)) {
+        perror(argv[2]);
+        exit(1);
+        }
+        char *text= malloc(sb.st_size);
+        if (!text) {
+        fatal("out of memory");
+        exit(1);
+        }
+        if (fread(text, sb.st_size, 1, fp) < 1) {
+        perror(argv[2]);
+        exit(1);
+        }
+        fclose(fp);
+        inputBuffer = mkInputBuffer(text);
+    }
+
+    if (!yyparse()) {
+        printf("Error\n");
+        return 1;
+    }
+
+    if( opt_c){
+
+        //int i=printCode(intern("start")->rule);
+        //printf("Node *start_rule= &node%i;\n",i);
+        FILE *outputFile = fopen(opt_c,"w");
+        declareSymbols(outputFile);
+        printSymbolTable(outputFile);
+        defineSymbols(outputFile);
+        return 0;
+    }
+
+    char   *line=0;
+    size_t  line_max=0;
+    ssize_t line_len=0;
+    Node   *startRule= intern("start")->rule;
+    
+    if (!startRule) {
+	fatal("no start rule");
+	return 1;
+    }
+
+    while ((line_len=getline(&line,&line_max,stdin))>=0) {
+        if (line_len>0 && line[line_len-1]=='\n') {
+            line[line_len-1]=0;
+        }
+        initInputBuffer(inputBuffer,line);
+        if (!execute(startRule, inputBuffer) || !atEnd(inputBuffer)) {
+            printf("no match, current position : %i\n", getPosition(inputBuffer));
+        }
+        else {
+            printf("match, current position : %i\n", getPosition(inputBuffer));
+        } // 0 => no match, 1 => match
+    }
+
+    return 0;
+
+
+
+    /*
+    switch (argc) {
+
+      case 1:{
+          int char_index=0;
+          char *text_file= malloc(50);
+          int ch;
+            while ( (ch = getchar()) != EOF ) {
+                printf("%c",ch);
+                text_file[char_index]=ch;
+                char_index++;
+            }
+            printf("%s",text_file);
+            inputBuffer = mkInputBuffer(text_file);
+	    break;
+         
+      }
+      case 2: {
+	  inputBuffer = mkInputBuffer(argv[1]);
+	  break;
+      }
+      case 3: {
+	  if (!strcmp("-f", argv[1])) {
+	      FILE *fp= fopen(argv[2], "r");
+	      if (!fp) {
+		  perror(argv[2]);
+		  exit(1);
+	      }
+	      struct stat sb;
+	      if (fstat(fileno(fp), &sb)) {
+		  perror(argv[2]);
+		  exit(1);
+	      }
+	      char *text= malloc(sb.st_size);
+	      if (!text) {
+		  fatal("out of memory");
+		  exit(1);
+	      }
+	      if (fread(text, sb.st_size, 1, fp) < 1) {
+		  perror(argv[2]);
+		  exit(1);
+	      }
+	      fclose(fp);
+	      inputBuffer = mkInputBuffer(text);
+	      break;
+	  }
+	  fatal("unrecognised option: %s", argv[1]);
+      }
+      
+      default: {
+	  fatal("usage: %s parsing-expression | -f filename", argv[0]);
+	  exit(1);
+      }
+    }
+
+    if (!yyparse()) {
+        printf("Error\n");
+        return 1;
+    }
+
+    char   *line=0;
+    size_t  line_max=0;
+    ssize_t line_len=0;
+    Node   *startRule= intern("start")->rule;
+    
+    if (!startRule) {
+	fatal("no start rule");
+	return 1;
+    }
+
+    while ((line_len=getline(&line,&line_max,stdin))>=0) {
+        if (line_len>0 && line[line_len-1]=='\n') {
+            line[line_len-1]=0;
+        }
+        initInputBuffer(inputBuffer,line);
+        if (!execute(startRule, inputBuffer) || !atEnd(inputBuffer)) {
+            printf("no match, current position : %i\n", getPosition(inputBuffer));
+        }
+        else {
+            printf("match, current position : %i\n", getPosition(inputBuffer));
+        } // 0 => no match, 1 => match
+    }
+
+    return 0;
+
+    */
+
+    (void)yySet;
+    (void)yyPop;
+    (void)yyPush;
+    (void)yyAccept;
+    (void)yymatchDot;
+    (void)yymatchString;
+    (void)yymatchChar;
+}
